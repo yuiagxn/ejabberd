@@ -145,9 +145,14 @@ init({SockMod, Socket}, Opts) ->
     DefinedHandlers = gen_mod:get_opt(
                         request_handlers, Opts,
                         fun(Hs) ->
+                                Hs1 = lists:map(fun
+                                  ({Mod, Path}) when is_atom(Mod) -> {Path, Mod};
+                                  ({Path, Mod}) -> {Path, Mod}
+                                end, Hs),
+
                                 [{str:tokens(
                                     iolist_to_binary(Path), <<"/">>),
-                                  Mod} || {Path, Mod} <- Hs]
+                                  Mod} || {Path, Mod} <- Hs1]
                         end, []),
     RequestHandlers = DefinedHandlers ++ Captcha ++ Register ++
         Admin ++ Bind ++ XMLRPC,
@@ -763,7 +768,8 @@ parse_auth(<<"Basic ", Auth64/binary>>) ->
             undefined;
         Pos ->
             {User, <<$:, Pass/binary>>} = erlang:split_binary(Auth, Pos-1),
-            {User, Pass}
+            PassUtf8 = unicode:characters_to_binary(binary_to_list(Pass), utf8),
+            {User, PassUtf8}
     end;
 parse_auth(<<"Bearer ", SToken/binary>>) ->
     Token = str:strip(SToken),

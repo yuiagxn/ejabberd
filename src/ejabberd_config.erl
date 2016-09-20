@@ -30,13 +30,15 @@
 	 add_global_option/2, add_local_option/2,
 	 get_global_option/2, get_local_option/2,
          get_global_option/3, get_local_option/3,
-         get_option/2, get_option/3, add_option/2,
+         get_option/2, get_option/3, add_option/2, has_option/1,
          get_vh_by_auth_method/1, is_file_readable/1,
          get_version/0, get_myhosts/0, get_mylang/0,
+         get_ejabberd_config_path/0, is_using_elixir_config/0,
          prepare_opt_val/4, convert_table_to_binary/5,
          transform_options/1, collect_options/1, default_db/2,
          convert_to_yaml/1, convert_to_yaml/2, v_db/2,
-         env_binary_to_list/2, opt_type/1, may_hide_data/1]).
+         env_binary_to_list/2, opt_type/1, may_hide_data/1,
+	 is_elixir_enabled/0]).
 
 -export([start/2]).
 
@@ -90,7 +92,7 @@ hosts_to_start(State) ->
 
 %% @private
 %% At the moment, these functions are mainly used to setup unit tests.
--spec(start/2 :: (Hosts :: [binary()], Opts :: [acl:acl() | local_config()]) -> ok).
+-spec start(Hosts :: [binary()], Opts :: [acl:acl() | local_config()]) -> ok.
 start(Hosts, Opts) ->
     mnesia_init(),
     set_opts(set_hosts_in_options(Hosts, #state{opts = Opts})).
@@ -147,7 +149,18 @@ read_file(File) ->
                      {include_modules_configs, true}]).
 
 read_file(File, Opts) ->
-    Terms1 = get_plain_terms_file(File, Opts),
+    Terms1 = case is_elixir_enabled() of
+		 true ->
+		     case 'Elixir.Ejabberd.ConfigUtil':is_elixir_config(File) of
+			 true ->
+			     'Elixir.Ejabberd.Config':init(File),
+			     'Elixir.Ejabberd.Config':get_ejabberd_opts();
+			 false ->
+			     get_plain_terms_file(File, Opts)
+		     end;
+		 false ->
+		     get_plain_terms_file(File, Opts)
+	     end,
     Terms_macros = case proplists:get_bool(replace_macros, Opts) of
                        true -> replace_macros(Terms1);
                        false -> Terms1
@@ -220,13 +233,11 @@ env_binary_to_list(Application, Parameter) ->
 %% in which the options 'include_config_file' were parsed
 %% and the terms in those files were included.
 %% @spec(iolist()) -> [term()]
-get_plain_terms_file(File) ->
-    get_plain_terms_file(File, [{include_files, true}]).
-
 get_plain_terms_file(File, Opts) when is_binary(File) ->
     get_plain_terms_file(binary_to_list(File), Opts);
 get_plain_terms_file(File1, Opts) ->
     File = get_absolute_path(File1),
+    DontStopOnError = lists:member(dont_halt_on_error, Opts),
     case consult(File) of
 	{ok, Terms} ->
             BinTerms1 = strings_to_binary(Terms),
@@ -246,9 +257,21 @@ get_plain_terms_file(File1, Opts) ->
                 false ->
                     BinTerms
             end;
-	{error, Reason} ->
+  {error, enoent, Reason} ->
+      case DontStopOnError of
+          true ->
+              ?WARNING_MSG(Reason, []),
+              [];
+          _ ->
 	    ?ERROR_MSG(Reason, []),
 	    exit_or_halt(Reason)
+      end;
+	{error, Reason} ->
+	    ?ERROR_MSG(Reason, []),
+      case DontStopOnError of
+          true -> [];
+          _ -> exit_or_halt(Reason)
+      end
     end.
 
 consult(File) ->
@@ -262,16 +285,28 @@ consult(File) ->
                 {error, Err} ->
                     Msg1 = "Cannot load " ++ File ++ ": ",
                     Msg2 = fast_yaml:format_error(Err),
+                    case Err of
+                        enoent ->
+                            {error, enoent, Msg1 ++ Msg2};
+                        _ ->
                     {error, Msg1 ++ Msg2}
+                    end
             end;
         _ ->
             case file:consult(File) of
                 {ok, Terms} ->
                     {ok, Terms};
+                {error, enoent} ->
+                    {error, enoent};
                 {error, {LineNumber, erl_parse, _ParseMessage} = Reason} ->
                     {error, describe_config_problem(File, Reason, LineNumber)};
                 {error, Reason} ->
+                    case Reason of
+                        enoent ->
+                            {error, enoent, describe_config_problem(File, Reason)};
+                        _ ->
                     {error, describe_config_problem(File, Reason)}
+            end
             end
     end.
 
@@ -296,7 +331,9 @@ get_absolute_path(File) ->
 	    File;
 	relative ->
 	    {ok, Dir} = file:get_cwd(),
-	    filename:absname_join(Dir, File)
+	    filename:absname_join(Dir, File);
+	volumerelative ->
+	    filename:absname(File)
     end.
 
 
@@ -473,8 +510,8 @@ include_config_files(Terms) ->
                        include_config_file(File, Opts)
                end, lists:flatten(FileOpts)),
 
-    M1 = merge_configs(transform_terms(Terms1), #{}),
-    M2 = merge_configs(transform_terms(Terms2), M1),
+    M1 = merge_configs(Terms1, #{}),
+    M2 = merge_configs(Terms2, M1),
     maps_to_lists(M2).
 
 transform_include_option({include_config_file, File}) when is_list(File) ->
@@ -488,7 +525,7 @@ transform_include_option({include_config_file, Filename, Options}) ->
     {Filename, Options}.
 
 include_config_file(Filename, Options) ->
-    Included_terms = get_plain_terms_file(Filename),
+    Included_terms = get_plain_terms_file(Filename, [{include_files, true}, dont_halt_on_error]),
     Disallow = proplists:get_value(disallow, Options, []),
     Included_terms2 = delete_disallowed(Disallow, Included_terms),
     Allow_only = proplists:get_value(allow_only, Options, all),
@@ -745,22 +782,32 @@ add_option(Opt, Val) ->
 -spec prepare_opt_val(any(), any(), check_fun(), any()) -> any().
 
 prepare_opt_val(Opt, Val, F, Default) ->
-    Res = case F of
-              {Mod, Fun} ->
-                  catch Mod:Fun(Val);
-              _ ->
-                  catch F(Val)
-          end,
-    case Res of
-        {'EXIT', _} ->
+    Call = case F of
+	       {Mod, Fun} ->
+		   fun() -> Mod:Fun(Val) end;
+	       _ ->
+		   fun() -> F(Val) end
+	   end,
+    try Call() of
+	Res ->
+	    Res
+    catch {replace_with, NewRes} ->
+	    NewRes;
+	  {invalid_syntax, Error} ->
+	    ?WARNING_MSG("incorrect value '~s' of option '~s', "
+			 "using '~s' as fallback: ~s",
+			 [format_term(Val),
+			  format_term(Opt),
+			  format_term(Default),
+			  Error]),
+	    Default;
+	  _:_ ->
 	    ?WARNING_MSG("incorrect value '~s' of option '~s', "
 			 "using '~s' as fallback",
 			 [format_term(Val),
 			  format_term(Opt),
 			  format_term(Default)]),
-            Default;
-        _ ->
-            Res
+	    Default
     end.
 
 -type check_fun() :: fun((any()) -> any()) | {module(), atom()}.
@@ -812,6 +859,10 @@ get_option(Opt, F, Default) ->
                     Default
             end
     end.
+
+-spec has_option(atom() | {atom(), global | binary()}) -> any().
+has_option(Opt) ->
+    get_option(Opt, fun(_) -> true end, false).
 
 init_module_db_table(Modules) ->
     catch ets:new(module_db, [named_table, public, bag]),
@@ -879,19 +930,26 @@ get_modules_with_options() ->
 
 validate_opts(#state{opts = Opts} = State) ->
     ModOpts = get_modules_with_options(),
-    NewOpts = lists:filter(
-		fun(#local_config{key = {Opt, _Host}, value = Val}) ->
+    NewOpts = lists:filtermap(
+		fun(#local_config{key = {Opt, _Host}, value = Val} = In) ->
 			case dict:find(Opt, ModOpts) of
 			    {ok, [Mod|_]} ->
 				VFun = Mod:opt_type(Opt),
-				case catch VFun(Val) of
-				    {'EXIT', _} ->
+				try VFun(Val) of
+				    _ ->
+					true
+				catch {replace_with, NewVal} ->
+					{true, In#local_config{value = NewVal}};
+				      {invalid_syntax, Error} ->
+					?ERROR_MSG("ignoring option '~s' with "
+						   "invalid value: ~p: ~s",
+						   [Opt, Val, Error]),
+					false;
+				      _:_ ->
 					?ERROR_MSG("ignoring option '~s' with "
 						   "invalid value: ~p",
 						   [Opt, Val]),
-					false;
-				    _ ->
-					true
+					false
 				end;
 			    _ ->
 				?ERROR_MSG("unknown option '~s' will be likely"
@@ -996,6 +1054,23 @@ replace_modules(Modules) ->
 
 %% Elixir module naming
 %% ====================
+
+-ifdef(ELIXIR_ENABLED).
+is_elixir_enabled() ->
+    true.
+-else.
+is_elixir_enabled() ->
+    false.
+-endif.
+
+is_using_elixir_config() ->
+    case is_elixir_enabled() of
+	true ->
+	    Config = get_ejabberd_config_path(),
+	    'Elixir.Ejabberd.ConfigUtil':is_elixir_config(Config);
+       false ->
+	    false
+    end.
 
 %% If module name start with uppercase letter, this is an Elixir module:
 is_elixir_module(Module) ->

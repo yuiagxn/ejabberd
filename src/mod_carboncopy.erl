@@ -37,7 +37,7 @@
 
 -export([user_send_packet/4, user_receive_packet/5,
 	 iq_handler2/3, iq_handler1/3, remove_connection/4,
-	 is_carbon_copy/1, mod_opt_type/1]).
+	 is_carbon_copy/1, mod_opt_type/1, depends/2]).
 
 -include("ejabberd.hrl").
 -include("logger.hrl").
@@ -131,8 +131,9 @@ user_receive_packet(Packet, _C2SState, JID, _From, To) ->
 %    - we also replicate "read" notifications
 check_and_forward(JID, To, Packet, Direction)->
     case is_chat_message(Packet) andalso
-	     fxml:get_subtag(Packet, <<"private">>) == false andalso
-		 fxml:get_subtag(Packet, <<"no-copy">>) == false of
+	     not is_muc_pm(To, Packet) andalso
+		 fxml:get_subtag(Packet, <<"private">>) == false andalso
+		     fxml:get_subtag(Packet, <<"no-copy">>) == false of
 	true ->
 	    case is_carbon_copy(Packet) of
 		false ->
@@ -270,6 +271,11 @@ is_chat_message(#xmlel{name = <<"message">>} = Packet) ->
     end;
 is_chat_message(_Packet) -> false.
 
+is_muc_pm(#jid{lresource = <<>>}, _Packet) ->
+    false;
+is_muc_pm(_To, Packet) ->
+    fxml:get_subtag_with_xmlns(Packet, <<"x">>, ?NS_MUC_USER) =/= false.
+
 has_non_empty_body(Packet) ->
     fxml:get_subtag_cdata(Packet, <<"body">>) =/= <<"">>.
 
@@ -277,6 +283,9 @@ has_non_empty_body(Packet) ->
 list(User, Server) ->
     Mod = gen_mod:db_mod(Server, ?MODULE),
     Mod:list(User, Server).
+
+depends(_Host, _Opts) ->
+    [].
 
 mod_opt_type(iqdisc) -> fun gen_iq_handler:check_type/1;
 mod_opt_type(db_type) -> fun(T) -> ejabberd_config:v_db(?MODULE, T) end;

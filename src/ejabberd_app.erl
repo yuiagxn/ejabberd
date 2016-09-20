@@ -45,6 +45,7 @@ start(normal, _Args) ->
     write_pid_file(),
     jid:start(),
     start_apps(),
+    start_elixir_application(),
     ejabberd:check_app(ejabberd),
     randoms:start(),
     db_init(),
@@ -55,6 +56,7 @@ start(normal, _Args) ->
     ejabberd_admin:start(),
     gen_mod:start(),
     ext_mod:start(),
+    setup_if_elixir_conf_used(),
     ejabberd_config:start(),
     set_settings_from_config(),
     acl:start(),
@@ -63,6 +65,7 @@ start(normal, _Args) ->
     Sup = ejabberd_sup:start_link(),
     ejabberd_rdbms:start(),
     ejabberd_riak_sup:start(),
+    ejabberd_redis:start(),
     ejabberd_sm:start(),
     cyrsasl:start(),
     % Profiling
@@ -73,6 +76,8 @@ start(normal, _Args) ->
     ejabberd_oauth:start(),
     gen_mod:start_modules(),
     ejabberd_listener:start_listeners(),
+    ejabberd_service:start(),
+    register_elixir_config_hooks(),
     ?INFO_MSG("ejabberd ~s is started in the node ~p", [?VERSION, node()]),
     Sup;
 start(_, _) ->
@@ -83,9 +88,9 @@ start(_, _) ->
 %% before shutting down the processes of the application.
 prep_stop(State) ->
     ejabberd_listener:stop_listeners(),
-    gen_mod:stop_modules(),
     ejabberd_admin:stop(),
     broadcast_c2s_shutdown(),
+    gen_mod:stop_modules(),
     timer:sleep(5000),
     State.
 
@@ -236,3 +241,26 @@ opt_type(modules) ->
 		      Mods)
     end;
 opt_type(_) -> [cluster_nodes, loglevel, modules, net_ticktime].
+
+setup_if_elixir_conf_used() ->
+  case ejabberd_config:is_using_elixir_config() of
+    true -> 'Elixir.Ejabberd.Config.Store':start_link();
+    false -> ok
+  end.
+
+register_elixir_config_hooks() ->
+  case ejabberd_config:is_using_elixir_config() of
+    true -> 'Elixir.Ejabberd.Config':start_hooks();
+    false -> ok
+  end.
+
+start_elixir_application() ->
+    case ejabberd_config:is_elixir_enabled() of
+	true ->
+	    case application:ensure_started(elixir) of
+		ok -> ok;
+		{error, _Msg} -> ?ERROR_MSG("Elixir application not started.", [])
+	    end;
+	_ ->
+	    ok
+    end.

@@ -33,7 +33,7 @@
 
 -export([start/2, init/0, stop/1, export/1, import/1,
 	 import/3, announce/3, send_motd/1, disco_identity/5,
-	 disco_features/5, disco_items/5,
+	 disco_features/5, disco_items/5, depends/2,
 	 send_announcement_to_all/3, announce_commands/4,
 	 announce_items/4, mod_opt_type/1]).
 
@@ -73,6 +73,9 @@ start(Host, Opts) ->
 		       ?MODULE, send_motd, 50),
     register(gen_mod:get_module_proc(Host, ?PROCNAME),
 	     proc_lib:spawn(?MODULE, init, [])).
+
+depends(_Host, _Opts) ->
+    [{mod_adhoc, hard}].
 
 init() ->
     loop().
@@ -693,7 +696,7 @@ announce_all(From, To, Packet) ->
 	    lists:foreach(
 	      fun({User, Server}) ->
 		      Dest = jid:make(User, Server, <<>>),
-		      ejabberd_router:route(Local, Dest, Packet)
+		      ejabberd_router:route(Local, Dest, add_store_hint(Packet))
 	      end, ejabberd_auth:get_vh_registered_users(Host))
     end.
 
@@ -710,7 +713,7 @@ announce_all_hosts_all(From, To, Packet) ->
 	    lists:foreach(
 	      fun({User, Server}) ->
 		      Dest = jid:make(User, Server, <<>>),
-		      ejabberd_router:route(Local, Dest, Packet)
+		      ejabberd_router:route(Local, Dest, add_store_hint(Packet))
 	      end, ejabberd_auth:dirty_get_registered_users())
     end.
 
@@ -896,15 +899,21 @@ send_announcement_to_all(Host, SubjectS, BodyS) ->
     lists:foreach(
       fun({U, S, R}) ->
 	      Dest = jid:make(U, S, R),
-	      ejabberd_router:route(Local, Dest, Packet)
+	      ejabberd_router:route(Local, Dest, add_store_hint(Packet))
       end, Sessions).
 
 -spec get_access(global | binary()) -> atom().
 
 get_access(Host) ->
     gen_mod:get_module_opt(Host, ?MODULE, access,
-                           fun(A) when is_atom(A) -> A end,
+                           fun(A) -> A end,
                            none).
+
+-spec add_store_hint(xmlel()) -> xmlel().
+
+add_store_hint(El) ->
+    Hint = #xmlel{name = <<"store">>, attrs = [{<<"xmlns">>, ?NS_HINTS}]},
+    fxml:append_subtags(El, [Hint]).
 
 %%-------------------------------------------------------------------------
 export(LServer) ->
@@ -920,6 +929,6 @@ import(LServer, DBType, LA) ->
     Mod:import(LServer, LA).
 
 mod_opt_type(access) ->
-    fun (A) when is_atom(A) -> A end;
+    fun acl:access_rules_validator/1;
 mod_opt_type(db_type) -> fun(T) -> ejabberd_config:v_db(?MODULE, T) end;
 mod_opt_type(_) -> [access, db_type].
